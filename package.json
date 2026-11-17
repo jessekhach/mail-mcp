@@ -1,0 +1,26 @@
+{
+  "name": "mail-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Claude connector for your own JMAP mail server, signing in with the server's own login.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "mcp-handler": "2.4.0",
+    "next": "16.4.6",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "typescript": "^5.9"
+  }
+}
