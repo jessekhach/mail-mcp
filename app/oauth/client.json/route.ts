@@ -6,7 +6,7 @@ export function GET(req: Request) {
   return Response.json(
     {
       client_id: clientId,
-      client_name: "Claude Mail Connector",
+      client_name: "mail-mcp",
       logo_uri: `${new URL(clientId).origin}/icon.png`,
       redirect_uris: [callback],
       grant_types: ["authorization_code", "refresh_token"],
