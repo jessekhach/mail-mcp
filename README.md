@@ -17,7 +17,7 @@
 
 ---
 
-I moved my email off Fastmail onto [Stalwart](https://stalw.art) running on a Mac mini at home, and the one thing I lost was Claude reading my mail. Gmail, Outlook and Fastmail all have official Claude connectors, but a mail server in your closet doesn't, so I wrote one.
+I moved my email from Fastmail to [Stalwart](https://stalw.art) on a Mac mini at home and missed having Claude in my inbox, so I wrote this.
 
 You deploy your own copy (free on Vercel's Hobby plan), point it at your server, and add it to Claude as a custom connector. When you connect, Claude sends you to your mail server's own login page. The connector never sees your password and stores nothing.
 
@@ -49,7 +49,16 @@ You need a JMAP mail server with OAuth. I've only tested Stalwart 1.1.
 
 Connectors added on claude.ai also show up in the Claude desktop and mobile apps and in Claude Code, as long as you're signed in to the same account.
 
-**Not on Vercel?** It's a plain Next.js app, so any Node host with HTTPS works: `npm ci && npm run build && JMAP_SESSION_URL=... npm start`.
+**Docker instead of Vercel:**
+
+```bash
+git clone https://github.com/jessekhach/mail-mcp && cd mail-mcp
+docker build -t mail-mcp .
+docker run -d --restart unless-stopped -p 3000:3000 \
+  -e JMAP_SESSION_URL=https://mail.example.com/jmap/session mail-mcp
+```
+
+Claude has to reach it over HTTPS, so put it behind a reverse proxy that sets `X-Forwarded-Host` and `X-Forwarded-Proto` (Caddy does by default). The connector builds its sign-in URLs from those headers.
 
 ## How it works
 
@@ -89,6 +98,7 @@ lib/tools.ts               the tools
 lib/jmap.ts                small JMAP client
 lib/oauth.ts               callback allowlist and upstream discovery
 scripts/make-icon.swift    draws the icon (swift scripts/make-icon.swift)
+Dockerfile                 standalone image, about 300 MB
 ```
 
 ## License
