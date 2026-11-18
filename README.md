@@ -28,6 +28,7 @@ You deploy your own copy (free on Vercel's Hobby plan), point it at your server,
 | `list_mailboxes` | Folders with their roles and counts |
 | `list_identities` | Addresses you can send from, with signatures |
 | `update_identity` | Changes an address's display name, signature, Reply-To or automatic Bcc |
+| `list_emails` | Newest messages in the inbox or any folder, optionally unread only |
 | `search_emails` | Full-text search plus from, to, subject, date, folder, unread, flagged and attachment filters |
 | `get_email` | One message: headers, body as text, its attachments |
 | `get_attachment` | Opens an attachment: text as text, images as images, PDFs and other files as files |

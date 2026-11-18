@@ -232,10 +232,37 @@ export function registerTools(server: McpServer) {
   );
 
   server.registerTool(
+    "list_emails",
+    {
+      title: "Read inbox or folder",
+      description: "Shows the newest messages in the inbox, or in any folder by name (Sent, Archive, Junk...). Use this for \"check my email\" or \"what's in my inbox\". Returns summaries; use get_email for the full message.",
+      inputSchema: z.object({
+        mailbox: z.string().default("inbox").describe("Folder name, role (inbox, sent, drafts, archive, junk, trash) or id"),
+        unread_only: z.boolean().default(false),
+        limit: z.number().int().min(1).max(100).default(25),
+        offset: z.number().int().min(0).default(0),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async (a, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const boxes = await getMailboxes(token, session);
+      const box = findMailbox(boxes, a.mailbox);
+      const names = Object.fromEntries(boxes.map((m) => [m.id, m.name]));
+      const filter: Record<string, unknown> = { inMailbox: box.id, ...(a.unread_only ? { notKeyword: "$seen" } : {}) };
+      const r = await call(token, session, [
+        ["Email/query", { accountId: session.accountId, filter, sort: [{ property: "receivedAt", isAscending: false }], position: a.offset, limit: a.limit, calculateTotal: true }, "q"],
+        ["Email/get", { accountId: session.accountId, "#ids": { resultOf: "q", name: "Email/query", path: "/ids" }, properties: SUMMARY }, "g"],
+      ]);
+      return reply({ mailbox: box.name, total: r.q.total, unread: box.unreadEmails, offset: a.offset, results: r.g.list.map((e: any) => summarize(e, names)) });
+    },
+  );
+
+  server.registerTool(
     "search_emails",
     {
       title: "Search email",
-      description: "Searches mail, newest first. All filters combine with AND. Returns summaries; use get_email for the full message.",
+      description: "Searches all mail by text, sender, date and more, newest first. All filters combine with AND. To just see a folder's newest mail, use list_emails. Returns summaries; use get_email for the full message.",
       inputSchema: z.object({
         query: z.string().optional().describe("Full-text search across headers and body"),
         from: z.string().optional(),
