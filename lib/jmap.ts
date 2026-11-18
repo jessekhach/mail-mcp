@@ -7,6 +7,7 @@ export const MAIL = [CORE, "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:su
 export const CALENDARS = [CORE, "urn:ietf:params:jmap:calendars"];
 export const CONTACTS = [CORE, "urn:ietf:params:jmap:contacts"];
 export const SIEVE = [CORE, "urn:ietf:params:jmap:sieve"];
+export const VACATION = [CORE, "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:vacationresponse"];
 
 export type Session = {
   apiUrl: string;

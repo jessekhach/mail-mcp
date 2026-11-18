@@ -11,7 +11,7 @@ import { ICON_DATA_URI } from "@/lib/icon";
 const serverInfo = {
   name: "jmap-mail",
   title: "Mail",
-  version: "0.3.0",
+  version: "0.4.0",
   icons: [{ src: ICON_DATA_URI, mimeType: "image/png", sizes: ["64x64"] }],
 };
 const handler = createMcpHandler(

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { call, download, getSession, upload, parseAddress, formatAddresses, type Address, type Session } from "./jmap";
+import { call, download, getSession, upload, VACATION, parseAddress, formatAddresses, type Address, type Session } from "./jmap";
 
 export type Ctx = { http?: { authInfo?: { token: string } } };
 type Mailbox = { id: string; name: string; role: string | null; parentId: string | null; totalEmails: number; unreadEmails: number };
@@ -201,13 +201,24 @@ export function registerTools(server: McpServer) {
     "list_identities",
     {
       title: "List sending addresses",
-      description: "Lists the addresses this account can send from, with display names.",
+      description: "Lists the addresses this account can send from, with display names, signatures, Reply-To and automatic Bcc.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     async (_args, ctx) => {
       const { token, session } = await auth(ctx as Ctx);
-      return reply(await getIdentities(token, session));
+      const r = await call(token, session, [["Identity/get", { accountId: session.accountId }, "i"]]);
+      return reply(
+        r.i.list.map((i: any) => ({
+          id: i.id,
+          name: i.name,
+          email: i.email,
+          replyTo: formatAddresses(i.replyTo) || undefined,
+          bcc: formatAddresses(i.bcc) || undefined,
+          textSignature: i.textSignature || undefined,
+          htmlSignature: i.htmlSignature || undefined,
+        })),
+      );
     },
   );
 
@@ -599,6 +610,101 @@ export function registerTools(server: McpServer) {
         throw new Error(`The server refused: ${JSON.stringify(fail)}`);
       }
       return reply({ deleted: box.name });
+    },
+  );
+
+  server.registerTool(
+    "mark_spam",
+    {
+      title: "Mark as spam",
+      description: "Marks messages as spam (moves them to Junk) or as not spam (moves them back to the Inbox).",
+      inputSchema: z.object({ ids: z.array(z.string()).min(1), spam: z.boolean().default(true) }),
+      annotations: { destructiveHint: false, idempotentHint: true },
+    },
+    async ({ ids, spam }, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const target = byRole(await getMailboxes(token, session), spam ? "junk" : "inbox");
+      const patch = { mailboxIds: { [target.id]: true }, "keywords/$junk": spam ? true : null, "keywords/$notjunk": spam ? null : true };
+      const r = await call(token, session, [["Email/set", { accountId: session.accountId, update: Object.fromEntries(ids.map((id) => [id, patch])) }, "u"]]);
+      return reply({ marked: Object.keys(r.u.updated ?? {}).length, as: spam ? "spam" : "not spam", movedTo: target.name, failed: r.u.notUpdated });
+    },
+  );
+
+  server.registerTool(
+    "update_identity",
+    {
+      title: "Edit sending address",
+      description: "Changes the display name, signature, Reply-To or automatic Bcc of one of your sending addresses (see list_identities). Signatures are not added to messages sent through this connector.",
+      inputSchema: z.object({
+        identity: z.string().describe("The address, e.g. jesse@example.com, or its id"),
+        name: z.string().optional().describe("Display name shown as the sender"),
+        text_signature: z.string().optional().describe('Plain-text signature; "" removes it'),
+        html_signature: z.string().optional().describe('HTML signature; "" removes it'),
+        reply_to: addressList.optional().describe("Reply-To addresses; an empty list removes it"),
+        bcc: addressList.optional().describe("Addresses always Bcc'd; an empty list removes it"),
+      }),
+      annotations: { destructiveHint: false, idempotentHint: true },
+    },
+    async (a, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const ids = await getIdentities(token, session);
+      const want = a.identity.trim().toLowerCase();
+      const id = ids.find((i) => i.id === a.identity || i.email.toLowerCase() === want);
+      if (!id) throw new Error(`No sending address "${a.identity}". Addresses: ${ids.map((i) => i.email).join(", ")}`);
+      const patch: Record<string, unknown> = {};
+      if (a.name !== undefined) patch.name = a.name;
+      if (a.text_signature !== undefined) patch.textSignature = a.text_signature;
+      if (a.html_signature !== undefined) patch.htmlSignature = a.html_signature;
+      if (a.reply_to) patch.replyTo = a.reply_to.length ? a.reply_to.map(parseAddress) : null;
+      if (a.bcc) patch.bcc = a.bcc.length ? a.bcc.map(parseAddress) : null;
+      if (!Object.keys(patch).length) throw new Error("Nothing to change.");
+      const r = await call(token, session, [["Identity/set", { accountId: session.accountId, update: { [id.id]: patch } }, "s"]]);
+      if (r.s.notUpdated?.[id.id]) throw new Error(`The server refused: ${JSON.stringify(r.s.notUpdated[id.id])}`);
+      return reply({ updated: id.email, changed: Object.keys(patch) });
+    },
+  );
+
+  server.registerTool(
+    "get_vacation_reply",
+    {
+      title: "Read auto-reply",
+      description: "Shows whether the vacation auto-reply is on, its dates and its message.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async (_args, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const r = await call(token, session, [["VacationResponse/get", { accountId: session.accountId }, "v"]], VACATION);
+      const v = r.v.list[0] ?? {};
+      return reply({ enabled: !!v.isEnabled, from: v.fromDate, to: v.toDate, subject: v.subject, body: v.textBody ?? (v.htmlBody ? stripHtml(v.htmlBody) : null) });
+    },
+  );
+
+  server.registerTool(
+    "set_vacation_reply",
+    {
+      title: "Set auto-reply",
+      description: "Turns the vacation auto-reply on or off and sets its message. With dates, it only answers mail that arrives between them.",
+      inputSchema: z.object({
+        enabled: z.boolean(),
+        body: z.string().optional().describe("Plain-text reply message"),
+        subject: z.string().optional().describe("Reply subject; the server picks one if omitted"),
+        from: z.string().optional().describe("Start, ISO date or time, e.g. 2026-12-20"),
+        to: z.string().optional().describe("Last day (inclusive) or an exact end time, ISO"),
+      }),
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async (a, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const patch: Record<string, unknown> = { isEnabled: a.enabled };
+      if (a.body !== undefined) patch.textBody = a.body;
+      if (a.subject !== undefined) patch.subject = a.subject || null;
+      if (a.from !== undefined) patch.fromDate = a.from ? toDate(a.from) : null;
+      // A date-only end means "through that day".
+      if (a.to !== undefined) patch.toDate = !a.to ? null : /^\d{4}-\d{2}-\d{2}$/.test(a.to) ? new Date(Date.parse(toDate(a.to)) + 86_400_000).toISOString() : toDate(a.to);
+      const r = await call(token, session, [["VacationResponse/set", { accountId: session.accountId, update: { singleton: patch } }, "v"]], VACATION);
+      if (r.v.notUpdated?.singleton) throw new Error(`The server refused: ${JSON.stringify(r.v.notUpdated.singleton)}`);
+      return reply({ enabled: a.enabled, ...patch });
     },
   );
 }
