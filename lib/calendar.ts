@@ -114,6 +114,30 @@ function setErrors(r: any, key: string, verb: string) {
   if (fail) throw new Error(`The server refused to ${verb} the event: ${JSON.stringify(fail)}`);
 }
 
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const dayAfter = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+
+/** Milliseconds the zone is ahead of UTC at a given instant. */
+function zoneOffset(utc: number, tz: string): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      .formatToParts(new Date(utc))
+      .map((p) => [p.type, p.value]),
+  );
+  return Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second) - Math.floor(utc / 1000) * 1000;
+}
+
+function zonedToUtc(local: string, tz: string): number {
+  const guess = Date.parse(`${local}Z`);
+  const t = guess - zoneOffset(guess, tz);
+  return guess - zoneOffset(t, tz);
+}
+
+/** Local date (or date and time) of an instant in a zone. */
+function localDate(utc: number, tz: string, withTime = false): string {
+  return new Date(utc + zoneOffset(utc, tz)).toISOString().slice(0, withTime ? 16 : 10);
+}
+
 const notify = z.boolean().default(true).describe("Email invitations, updates or replies to the other participants");
 
 export function registerCalendarTools(server: McpServer) {
@@ -165,6 +189,73 @@ export function registerCalendarTools(server: McpServer) {
         myAddresses(token, session),
       ]);
       return reply({ after, before, results: r.g.list.map((e: any) => summarize(e, names, mine)) });
+    },
+  );
+
+  server.registerTool(
+    "find_free_time",
+    {
+      title: "Find free time",
+      description: "Finds open time across your calendars within working hours, at least duration_minutes long. All-day events, events marked free, cancelled events and invites you declined don't count as busy.",
+      inputSchema: z.object({
+        after: z.string().optional().describe("First day to search, e.g. 2026-11-18. Defaults to today"),
+        before: z.string().optional().describe("Last day to search. Defaults to 7 days after the first"),
+        duration_minutes: z.number().int().min(5).max(1440).default(30),
+        time_zone: z.string().optional().describe("IANA time zone for working hours and results. Defaults to the default calendar's zone"),
+        day_start: z.string().default("09:00").describe("Start of working hours, HH:MM"),
+        day_end: z.string().default("18:00").describe("End of working hours, HH:MM"),
+        weekdays_only: z.boolean().default(true),
+        calendars: z.array(z.string()).optional().describe("Only count these calendars as busy (names or ids); all calendars if omitted"),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async (a, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const acct = accountId(session);
+      const cals = await getCalendars(token, session);
+      const tz = a.time_zone ?? findCalendar(cals).timeZone ?? "Etc/UTC";
+      const first = (a.after ?? localDate(Date.now(), tz)).slice(0, 10);
+      const last = (a.before ?? new Date(Date.parse(`${first}T00:00:00Z`) + 6 * 86_400_000).toISOString()).slice(0, 10);
+      if (!/^\d{2}:\d{2}$/.test(a.day_start) || !/^\d{2}:\d{2}$/.test(a.day_end)) throw new Error("day_start and day_end must be HH:MM.");
+      const only = a.calendars?.map((c) => findCalendar(cals, c).id);
+
+      const [r, mine] = await Promise.all([
+        run(token, session, [
+          ["CalendarEvent/query", { accountId: acct, filter: { after: `${first}T00:00:00`, before: `${dayAfter(last)}T00:00:00` }, expandRecurrences: true, timeZone: tz, limit: 2000 }, "q"],
+          ["CalendarEvent/get", { accountId: acct, "#ids": { resultOf: "q", name: "CalendarEvent/query", path: "/ids" }, properties: ["calendarIds", "utcStart", "utcEnd", "showWithoutTime", "freeBusyStatus", "status", "participants"] }, "g"],
+        ]),
+        myAddresses(token, session),
+      ]);
+      const busy = (r.g.list as any[])
+        .filter((e) => !e.showWithoutTime && e.freeBusyStatus !== "free" && e.status !== "cancelled")
+        .filter((e) => !only || Object.keys(e.calendarIds ?? {}).some((id) => only.includes(id)))
+        .filter((e) => {
+          const me = (Object.values(e.participants ?? {}) as any[]).find((p) => mine.has(participantEmail(p)));
+          return me?.participationStatus !== "declined";
+        })
+        .map((e) => [Date.parse(e.utcStart), Date.parse(e.utcEnd)] as [number, number])
+        .filter(([s, e]) => !isNaN(s) && !isNaN(e))
+        .sort((x, y) => x[0] - y[0]);
+
+      const need = a.duration_minutes * 60_000;
+      const free: { day: string; start: string; end: string; minutes: number }[] = [];
+      for (let day = first; day <= last; day = dayAfter(day)) {
+        const weekday = new Date(`${day}T00:00:00Z`).getUTCDay();
+        if (a.weekdays_only && (weekday === 0 || weekday === 6)) continue;
+        let cursor = Math.max(zonedToUtc(`${day}T${a.day_start}:00`, tz), Math.ceil(Date.now() / 300_000) * 300_000);
+        const end = zonedToUtc(`${day}T${a.day_end}:00`, tz);
+        const push = (s: number, e: number) => {
+          if (e - s >= need) free.push({ day: DAYS[weekday], start: localDate(s, tz, true), end: localDate(e, tz, true), minutes: Math.round((e - s) / 60_000) });
+        };
+        for (const [s, e] of busy) {
+          if (e <= cursor || s >= end) continue;
+          push(cursor, Math.min(s, end));
+          cursor = Math.max(cursor, e);
+          if (cursor >= end) break;
+        }
+        push(cursor, end);
+      }
+      return reply({ timeZone: tz, from: first, to: last, free });
     },
   );
 

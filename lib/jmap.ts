@@ -6,9 +6,12 @@ const CORE = "urn:ietf:params:jmap:core";
 export const MAIL = [CORE, "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"];
 export const CALENDARS = [CORE, "urn:ietf:params:jmap:calendars"];
 export const CONTACTS = [CORE, "urn:ietf:params:jmap:contacts"];
+export const SIEVE = [CORE, "urn:ietf:params:jmap:sieve"];
 
 export type Session = {
   apiUrl: string;
+  downloadUrl: string;
+  uploadUrl: string;
   accountId: string;
   // Absent when the token was granted before the connector asked for these scopes.
   calendarAccountId?: string;
@@ -43,6 +46,8 @@ export async function getSession(token: string): Promise<Session | null> {
 
   const session = {
     apiUrl: data.apiUrl,
+    downloadUrl: data.downloadUrl,
+    uploadUrl: data.uploadUrl,
     accountId,
     calendarAccountId: data.primaryAccounts?.["urn:ietf:params:jmap:calendars"],
     contactsAccountId: data.primaryAccounts?.["urn:ietf:params:jmap:contacts"],
@@ -78,6 +83,29 @@ export async function call(
     out[id] = args;
   }
   return out;
+}
+
+const fill = (template: string, vars: Record<string, string>) =>
+  template.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? encodeURIComponent(vars[k]) : m));
+
+/** Uploads bytes and returns the blob id (RFC 8620 section 6.1). */
+export async function upload(token: string, s: Session, data: Uint8Array, type: string, accountId = s.accountId): Promise<string> {
+  const res = await fetch(fill(s.uploadUrl, { accountId }), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": type },
+    body: data as BodyInit,
+  });
+  if (!res.ok) throw new JmapError(`Upload failed with HTTP ${res.status}`);
+  return (await res.json()).blobId;
+}
+
+export async function download(token: string, s: Session, blobId: string, name: string, type: string): Promise<Uint8Array> {
+  const res = await fetch(fill(s.downloadUrl, { accountId: s.accountId, blobId, name, type }), {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new JmapError(`Download failed with HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 export type Address = { name?: string | null; email: string };

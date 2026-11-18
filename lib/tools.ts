@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
-import { call, getSession, parseAddress, formatAddresses, type Address, type Session } from "./jmap";
+import { call, download, getSession, upload, parseAddress, formatAddresses, type Address, type Session } from "./jmap";
 
 export type Ctx = { http?: { authInfo?: { token: string } } };
 type Mailbox = { id: string; name: string; role: string | null; parentId: string | null; totalEmails: number; unreadEmails: number };
@@ -94,7 +94,10 @@ type Compose = {
   html?: string;
   inReplyTo?: string[];
   references?: string[];
+  attachments?: Attachment[];
 };
+
+type Attachment = { blobId: string; type: string; name: string };
 
 /** Creates the message in Drafts and, when send is true, submits it and moves it to Sent. */
 async function compose(token: string, s: Session, c: Compose, send: boolean) {
@@ -111,6 +114,7 @@ async function compose(token: string, s: Session, c: Compose, send: boolean) {
     ...(c.html ? { htmlBody: [{ partId: "html", type: "text/html" }] } : {}),
     ...(c.cc?.length ? { cc: c.cc } : {}),
     ...(c.inReplyTo?.length ? { inReplyTo: c.inReplyTo, references: c.references } : {}),
+    ...(c.attachments?.length ? { attachments: c.attachments.map((a) => ({ ...a, disposition: "attachment" })) } : {}),
   };
   const calls: [string, Record<string, unknown>, string][] = [["Email/set", { accountId: s.accountId, create: { draft: email } }, "e"]];
   if (send) {
@@ -134,6 +138,49 @@ async function compose(token: string, s: Session, c: Compose, send: boolean) {
 }
 
 const addressList = z.array(z.string()).describe('Addresses as "a@b.com" or "Name <a@b.com>"');
+
+const attachmentInput = z
+  .array(
+    z.object({
+      filename: z.string().optional().describe("Name for a new file, or the name of an attachment to reuse"),
+      text: z.string().optional().describe("Content of a new text file (CSV, Markdown, .ics, ...)"),
+      base64: z.string().optional().describe("Content of a new binary file, base64-encoded"),
+      type: z.string().optional().describe("MIME type of a new file; guessed from the name if omitted"),
+      from_email_id: z.string().optional().describe("Reuse an attachment from this email: the one named filename, or all of them"),
+    }),
+  )
+  .optional()
+  .describe("Files to attach: new content, or attachments from existing emails");
+
+const MIME: Record<string, string> = { txt: "text/plain", md: "text/markdown", csv: "text/csv", html: "text/html", json: "application/json", ics: "text/calendar", pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", zip: "application/zip" };
+const guessType = (name: string) => MIME[name.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
+
+async function emailAttachments(token: string, s: Session, emailId: string): Promise<Attachment[]> {
+  const r = await call(token, s, [["Email/get", { accountId: s.accountId, ids: [emailId], properties: ["attachments"] }, "g"]]);
+  const e = r.g.list[0];
+  if (!e) throw new Error(`No email with id ${emailId}`);
+  return (e.attachments ?? []).map((p: any, i: number) => ({ blobId: p.blobId, type: p.type, name: p.name ?? `attachment-${i + 1}` }));
+}
+
+async function resolveAttachments(token: string, s: Session, list: z.infer<typeof attachmentInput>): Promise<Attachment[]> {
+  const out: Attachment[] = [];
+  for (const a of list ?? []) {
+    if (a.from_email_id) {
+      const all = await emailAttachments(token, s, a.from_email_id);
+      const pick = a.filename ? all.filter((x) => x.name === a.filename) : all;
+      if (!pick.length) throw new Error(`Email ${a.from_email_id} has no attachment${a.filename ? ` named "${a.filename}"` : "s"}. It has: ${all.map((x) => x.name).join(", ") || "none"}`);
+      out.push(...pick);
+    } else {
+      if (!a.filename || (a.text === undefined && a.base64 === undefined)) throw new Error("A new attachment needs filename and text or base64.");
+      const type = a.type ?? guessType(a.filename);
+      const bytes = a.text !== undefined ? new TextEncoder().encode(a.text) : Uint8Array.from(Buffer.from(a.base64!, "base64"));
+      out.push({ blobId: await upload(token, s, bytes, type), type, name: a.filename });
+    }
+  }
+  return out;
+}
+
+const READABLE_TEXT = /^(text\/|application\/(json|xml|csv|ics|javascript|x-yaml|yaml))/;
 
 export function registerTools(server: McpServer) {
   server.registerTool(
@@ -212,7 +259,7 @@ export function registerTools(server: McpServer) {
     "get_email",
     {
       title: "Read email",
-      description: "Returns one message with headers, plain-text body (HTML converted to text) and attachment names.",
+      description: "Returns one message with headers, plain-text body (HTML converted to text) and its attachments. Use get_attachment to open one.",
       inputSchema: z.object({ id: z.string() }),
       annotations: { readOnlyHint: true },
     },
@@ -232,7 +279,7 @@ export function registerTools(server: McpServer) {
         replyTo: formatAddresses(e.replyTo) || undefined,
         sentAt: e.sentAt,
         body: bodyText(e),
-        attachments: (e.attachments ?? []).map((p: any) => ({ name: p.name, type: p.type, size: p.size })),
+        attachments: (e.attachments ?? []).map((p: any, i: number) => ({ index: i, name: p.name, type: p.type, size: p.size })),
       });
     },
   );
@@ -265,6 +312,7 @@ export function registerTools(server: McpServer) {
     subject: z.string(),
     body: z.string().describe("Plain-text body"),
     html: z.string().optional().describe("Optional HTML version of the body"),
+    attachments: attachmentInput,
   };
 
   server.registerTool(
@@ -278,7 +326,7 @@ export function registerTools(server: McpServer) {
     async (a, ctx) => {
       const { token, session } = await auth(ctx as Ctx);
       const identity = pickIdentity(await getIdentities(token, session), a.from, session.username);
-      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body, html: a.html }, true);
+      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body, html: a.html, attachments: await resolveAttachments(token, session, a.attachments) }, true);
       return reply({ sent: true, ...res });
     },
   );
@@ -294,7 +342,7 @@ export function registerTools(server: McpServer) {
     async (a, ctx) => {
       const { token, session } = await auth(ctx as Ctx);
       const identity = pickIdentity(await getIdentities(token, session), a.from, session.username);
-      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body, html: a.html }, false);
+      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body, html: a.html, attachments: await resolveAttachments(token, session, a.attachments) }, false);
       return reply({ draft: true, ...res });
     },
   );
@@ -311,6 +359,7 @@ export function registerTools(server: McpServer) {
         from: z.string().optional(),
         quote_original: z.boolean().default(true),
         send: z.boolean().default(true),
+        attachments: attachmentInput,
       }),
       annotations: { destructiveHint: false, openWorldHint: true },
     },
@@ -340,7 +389,7 @@ export function registerTools(server: McpServer) {
       const res = await compose(
         token,
         session,
-        { identity, to, cc, subject, body: a.body + quoted, inReplyTo: o.messageId ?? [], references: [...(o.references ?? []), ...(o.messageId ?? [])] },
+        { identity, to, cc, subject, body: a.body + quoted, inReplyTo: o.messageId ?? [], references: [...(o.references ?? []), ...(o.messageId ?? [])], attachments: await resolveAttachments(token, session, a.attachments) },
         a.send,
       );
       if (a.send) await call(token, session, [["Email/set", { accountId: session.accountId, update: { [a.email_id]: { "keywords/$answered": true } } }, "a"]]);
@@ -400,6 +449,156 @@ export function registerTools(server: McpServer) {
       const trash = byRole(await getMailboxes(token, session), "trash");
       const r = await call(token, session, [["Email/set", { accountId: session.accountId, update: Object.fromEntries(ids.map((id) => [id, { mailboxIds: { [trash.id]: true } }])) }, "u"]]);
       return reply({ trashed: Object.keys(r.u.updated ?? {}).length, failed: r.u.notUpdated });
+    },
+  );
+
+  server.registerTool(
+    "get_attachment",
+    {
+      title: "Open attachment",
+      description: "Returns an email attachment's content: text files as text, images as images, anything else (PDF, Office...) as a file. Pick it by index or name from get_email.",
+      inputSchema: z.object({ email_id: z.string(), index: z.number().int().min(0).optional(), name: z.string().optional() }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ email_id, index, name }, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const all = await emailAttachments(token, session, email_id);
+      const att = name !== undefined ? all.find((x) => x.name === name) : all[index ?? 0];
+      if (!att) throw new Error(`No such attachment. This email has: ${all.map((x, i) => `${i}: ${x.name}`).join(", ") || "none"}`);
+      const bytes = await download(token, session, att.blobId, att.name, att.type);
+      const type = att.type.toLowerCase();
+      if (READABLE_TEXT.test(type)) {
+        const text = new TextDecoder().decode(bytes);
+        return reply(type === "text/html" ? stripHtml(text) : text.slice(0, 500_000));
+      }
+      if (bytes.length > 15_000_000) throw new Error(`${att.name} is ${Math.round(bytes.length / 1e6)} MB, too large to open here.`);
+      const data = Buffer.from(bytes).toString("base64");
+      if (type.startsWith("image/")) return { content: [{ type: "image" as const, data, mimeType: att.type }] };
+      return { content: [{ type: "resource" as const, resource: { uri: `attachment:///${encodeURIComponent(att.name)}`, mimeType: att.type, blob: data } }] };
+    },
+  );
+
+  server.registerTool(
+    "forward_email",
+    {
+      title: "Forward email",
+      description: "Forwards a message with its attachments, adding your note above the original. Set send=false to save as a draft instead.",
+      inputSchema: z.object({
+        email_id: z.string(),
+        to: addressList,
+        cc: addressList.optional(),
+        bcc: addressList.optional(),
+        body: z.string().default("").describe("Your note above the forwarded message"),
+        from: z.string().optional(),
+        include_attachments: z.boolean().default(true),
+        send: z.boolean().default(true),
+      }),
+      annotations: { destructiveHint: false, openWorldHint: true },
+    },
+    async (a, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const ids = await getIdentities(token, session);
+      const r = await call(token, session, [[
+        "Email/get",
+        { accountId: session.accountId, ids: [a.email_id], properties: ["from", "to", "cc", "subject", "sentAt", "receivedAt", "textBody", "htmlBody", "bodyValues", "attachments"], fetchTextBodyValues: true, fetchHTMLBodyValues: true, maxBodyValueBytes: 200_000 },
+        "g",
+      ]]);
+      const o = r.g.list[0];
+      if (!o) throw new Error(`No email with id ${a.email_id}`);
+      const mine = new Set(ids.map((i) => i.email.toLowerCase()));
+      const fromEmail = a.from ?? ([...(o.to ?? []), ...(o.cc ?? [])] as Address[]).find((x) => mine.has(x.email.toLowerCase()))?.email;
+      const header = [
+        "---------- Forwarded message ----------",
+        `From: ${formatAddresses(o.from)}`,
+        `Date: ${new Date(o.sentAt ?? o.receivedAt).toUTCString()}`,
+        `Subject: ${o.subject ?? ""}`,
+        `To: ${formatAddresses(o.to)}`,
+        ...(o.cc?.length ? [`Cc: ${formatAddresses(o.cc)}`] : []),
+      ].join("\n");
+      const attachments: Attachment[] = a.include_attachments
+        ? (o.attachments ?? []).map((p: any, i: number) => ({ blobId: p.blobId, type: p.type, name: p.name ?? `attachment-${i + 1}` }))
+        : [];
+      const res = await compose(
+        token,
+        session,
+        {
+          identity: pickIdentity(ids, fromEmail, session.username),
+          to: a.to.map(parseAddress),
+          cc: a.cc?.map(parseAddress),
+          bcc: a.bcc?.map(parseAddress),
+          subject: /^fwd?:/i.test(o.subject ?? "") ? o.subject : `Fwd: ${o.subject ?? ""}`,
+          body: `${a.body ? `${a.body}\n\n` : ""}${header}\n\n${bodyText(o)}`,
+          attachments,
+        },
+        a.send,
+      );
+      if (a.send) await call(token, session, [["Email/set", { accountId: session.accountId, update: { [a.email_id]: { "keywords/$forwarded": true } } }, "f"]]);
+      return reply({ [a.send ? "sent" : "draft"]: true, attachments: attachments.length, ...res });
+    },
+  );
+
+  server.registerTool(
+    "create_mailbox",
+    {
+      title: "Create folder",
+      description: "Creates a mail folder, optionally inside another one.",
+      inputSchema: z.object({ name: z.string(), parent: z.string().optional().describe("Parent folder name, role or id") }),
+      annotations: { destructiveHint: false },
+    },
+    async ({ name, parent }, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const parentId = parent ? findMailbox(await getMailboxes(token, session), parent).id : null;
+      const r = await call(token, session, [["Mailbox/set", { accountId: session.accountId, create: { m: { name, parentId } } }, "s"]]);
+      if (r.s.notCreated?.m) throw new Error(`The server refused: ${JSON.stringify(r.s.notCreated.m)}`);
+      return reply({ created: true, id: r.s.created.m.id, name });
+    },
+  );
+
+  server.registerTool(
+    "update_mailbox",
+    {
+      title: "Rename or move folder",
+      description: "Renames a mail folder and/or moves it under another folder.",
+      inputSchema: z.object({
+        mailbox: z.string().describe("Folder name, role or id"),
+        name: z.string().optional().describe("New name"),
+        parent: z.string().optional().describe('New parent folder, or "" for the top level'),
+      }),
+      annotations: { destructiveHint: false, idempotentHint: true },
+    },
+    async (a, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const boxes = await getMailboxes(token, session);
+      const box = findMailbox(boxes, a.mailbox);
+      const patch: Record<string, unknown> = {};
+      if (a.name) patch.name = a.name;
+      if (a.parent !== undefined) patch.parentId = a.parent === "" ? null : findMailbox(boxes, a.parent).id;
+      if (!Object.keys(patch).length) throw new Error("Pass name and/or parent.");
+      const r = await call(token, session, [["Mailbox/set", { accountId: session.accountId, update: { [box.id]: patch } }, "s"]]);
+      if (r.s.notUpdated?.[box.id]) throw new Error(`The server refused: ${JSON.stringify(r.s.notUpdated[box.id])}`);
+      return reply({ updated: true, id: box.id, ...patch });
+    },
+  );
+
+  server.registerTool(
+    "delete_mailbox",
+    {
+      title: "Delete folder",
+      description: "Deletes a mail folder. If it still has messages, it is left alone unless delete_messages=true, which destroys every message that is only in that folder and can't be undone.",
+      inputSchema: z.object({ mailbox: z.string(), delete_messages: z.boolean().default(false) }),
+      annotations: { destructiveHint: true },
+    },
+    async ({ mailbox, delete_messages }, ctx) => {
+      const { token, session } = await auth(ctx as Ctx);
+      const box = findMailbox(await getMailboxes(token, session), mailbox);
+      if (box.role) throw new Error(`${box.name} is the ${box.role} folder, which can't be deleted.`);
+      const r = await call(token, session, [["Mailbox/set", { accountId: session.accountId, destroy: [box.id], onDestroyRemoveEmails: delete_messages }, "d"]]);
+      const fail = r.d.notDestroyed?.[box.id];
+      if (fail) {
+        if (fail.type === "mailboxHasEmail") throw new Error(`${box.name} still has ${box.totalEmails} messages. Move them out, or pass delete_messages=true to destroy them.`);
+        throw new Error(`The server refused: ${JSON.stringify(fail)}`);
+      }
+      return reply({ deleted: box.name });
     },
   );
 }
