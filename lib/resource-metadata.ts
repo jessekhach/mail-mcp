@@ -7,7 +7,7 @@ export function GET(req: Request) {
   const body = generateProtectedResourceMetadata({
     authServerUrls: [origin],
     resourceUrl: `${origin}/mcp`,
-    additionalMetadata: { scopes_supported: ["mail"] },
+    additionalMetadata: { scopes_supported: ["mail", "calendars", "contacts"] },
   });
   return Response.json(body, { headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=60" } });
 }

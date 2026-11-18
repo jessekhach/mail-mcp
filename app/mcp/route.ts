@@ -1,5 +1,7 @@
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import { registerTools } from "@/lib/tools";
+import { registerCalendarTools } from "@/lib/calendar";
+import { registerContactTools } from "@/lib/contacts";
 import { getSession } from "@/lib/jmap";
 import { ICON_DATA_URI } from "@/lib/icon";
 
@@ -8,10 +10,17 @@ import { ICON_DATA_URI } from "@/lib/icon";
 const serverInfo = {
   name: "jmap-mail",
   title: "Mail",
-  version: "0.1.0",
+  version: "0.2.0",
   icons: [{ src: ICON_DATA_URI, mimeType: "image/png", sizes: ["64x64"] }],
 };
-const handler = createMcpHandler((server) => registerTools(server), { serverInfo });
+const handler = createMcpHandler(
+  (server) => {
+    registerTools(server);
+    registerCalendarTools(server);
+    registerContactTools(server);
+  },
+  { serverInfo },
+);
 
 // A token is valid if the JMAP server accepts it. Nothing is stored here.
 async function verifyToken(_req: Request, token?: string) {

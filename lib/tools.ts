@@ -2,11 +2,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { call, getSession, parseAddress, formatAddresses, type Address, type Session } from "./jmap";
 
-type Ctx = { http?: { authInfo?: { token: string } } };
+export type Ctx = { http?: { authInfo?: { token: string } } };
 type Mailbox = { id: string; name: string; role: string | null; parentId: string | null; totalEmails: number; unreadEmails: number };
 type Identity = { id: string; name: string; email: string };
 
-async function auth(ctx: Ctx) {
+export async function auth(ctx: Ctx) {
   const token = ctx.http?.authInfo?.token;
   if (!token) throw new Error("Not signed in to the mail server.");
   const session = await getSession(token);
@@ -14,7 +14,7 @@ async function auth(ctx: Ctx) {
   return { token, session };
 }
 
-const reply = (value: unknown) => ({
+export const reply = (value: unknown) => ({
   content: [{ type: "text" as const, text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 });
 
@@ -23,7 +23,7 @@ async function getMailboxes(token: string, s: Session): Promise<Mailbox[]> {
   return r.m.list;
 }
 
-async function getIdentities(token: string, s: Session): Promise<Identity[]> {
+export async function getIdentities(token: string, s: Session): Promise<Identity[]> {
   const r = await call(token, s, [["Identity/get", { accountId: s.accountId }, "i"]]);
   return r.i.list.map((i: Identity) => ({ id: i.id, name: i.name, email: i.email }));
 }
@@ -75,7 +75,7 @@ function summarize(e: any, names: Record<string, string>) {
   };
 }
 
-const toDate = (d: string) => (/^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00Z` : new Date(d).toISOString());
+export const toDate = (d: string) => (/^\d{4}-\d{2}-\d{2}$/.test(d) ? `${d}T00:00:00Z` : new Date(d).toISOString());
 const stripHtml = (h: string) => h.replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, "").replace(/<br\s*\/?>|<\/p>|<\/div>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\n{3,}/g, "\n\n").trim();
 
 function bodyText(e: any): string {

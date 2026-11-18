@@ -7,7 +7,8 @@ import { sessionUrl } from "./jmap";
 // issue. The client's PKCE challenge is passed through to the mail server, which verifies
 // it, so nothing here needs storage or a secret.
 
-export const UPSTREAM_SCOPE = "offline_access urn:ietf:params:oauth:scope:mail";
+export const UPSTREAM_SCOPE =
+  "offline_access urn:ietf:params:oauth:scope:mail urn:ietf:params:oauth:scope:calendars urn:ietf:params:oauth:scope:contacts";
 
 const TRUSTED_REDIRECTS = [
   "https://claude.ai/api/mcp/auth_callback",

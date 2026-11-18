@@ -1,8 +1,8 @@
 {
   "name": "mail-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "A Claude connector for your own JMAP mail server, signing in with the server's own login.",
+  "description": "A Claude connector for your own JMAP mail server (email, calendars, contacts), signing in with the server's own login.",
   "license": "MIT",
   "scripts": {
     "dev": "next dev",

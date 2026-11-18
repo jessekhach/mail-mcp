@@ -32,7 +32,7 @@ button{background:var(--accent);color:#fff;border:0;margin-bottom:8px}a{color:va
 </style></head><body><main>
 <img src="/icon.png" alt="">
 <h1>Allow access to your mail?</h1>
-<p><strong>${who}</strong> wants to read, send and delete your email. You'll sign in on your mail server next.</p>
+<p><strong>${who}</strong> wants to read, send and delete your email, and read and change your calendars and contacts. You'll sign in on your mail server next.</p>
 <form method="post" action="/oauth/authorize">${hidden}<input type="hidden" name="consent" value="${nonce}">
 <button type="submit">Continue</button></form>
 <a href="${esc(cancel.toString())}">Cancel</a>

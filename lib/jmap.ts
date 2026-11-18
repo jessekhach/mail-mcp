@@ -1,15 +1,18 @@
-// Minimal JMAP client (RFC 8620 core, RFC 8621 mail). Every call uses the caller's own
-// OAuth access token from the JMAP server, so this connector stores no credentials.
+// Minimal JMAP client (RFC 8620 core, RFC 8621 mail, RFC 9610 contacts, JMAP calendars).
+// Every call uses the caller's own OAuth access token from the JMAP server, so this
+// connector stores no credentials.
 
-const USING = [
-  "urn:ietf:params:jmap:core",
-  "urn:ietf:params:jmap:mail",
-  "urn:ietf:params:jmap:submission",
-];
+const CORE = "urn:ietf:params:jmap:core";
+export const MAIL = [CORE, "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"];
+export const CALENDARS = [CORE, "urn:ietf:params:jmap:calendars"];
+export const CONTACTS = [CORE, "urn:ietf:params:jmap:contacts"];
 
 export type Session = {
   apiUrl: string;
   accountId: string;
+  // Absent when the token was granted before the connector asked for these scopes.
+  calendarAccountId?: string;
+  contactsAccountId?: string;
   username: string;
 };
 
@@ -38,7 +41,13 @@ export async function getSession(token: string): Promise<Session | null> {
   const accountId = data.primaryAccounts?.["urn:ietf:params:jmap:mail"];
   if (!accountId || !data.apiUrl) return null;
 
-  const session = { apiUrl: data.apiUrl, accountId, username: data.username };
+  const session = {
+    apiUrl: data.apiUrl,
+    accountId,
+    calendarAccountId: data.primaryAccounts?.["urn:ietf:params:jmap:calendars"],
+    contactsAccountId: data.primaryAccounts?.["urn:ietf:params:jmap:contacts"],
+    username: data.username,
+  };
   sessions.set(token, { session, at: Date.now() });
   return session;
 }
@@ -50,11 +59,12 @@ export async function call(
   token: string,
   session: Session,
   calls: Call[],
+  using: string[] = MAIL,
 ): Promise<Record<string, any>> {
   const res = await fetch(session.apiUrl, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ using: USING, methodCalls: calls }),
+    body: JSON.stringify({ using, methodCalls: calls }),
     cache: "no-store",
   });
   if (!res.ok) throw new JmapError(`JMAP server returned HTTP ${res.status}`);

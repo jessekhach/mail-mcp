@@ -4,7 +4,7 @@
 
 <h1 align="center">mail-mcp</h1>
 
-<p align="center">Connect Claude, ChatGPT or any MCP client to your own mail server. Signs in with your server's login, works over JMAP.</p>
+<p align="center">Connect Claude, ChatGPT or any MCP client to your own mail server's email, calendars and contacts. Signs in with your server's login, works over JMAP.</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/jessekhach/mail-mcp" alt="MIT license"></a>
@@ -36,6 +36,20 @@ You deploy your own copy (free on Vercel's Hobby plan), point it at your server,
 | `move_emails` | Moves to a folder (archive, junk, any name) |
 | `update_emails` | Marks read, unread, flagged |
 | `delete_emails` | Moves to Trash, or deletes permanently if asked |
+| `list_calendars` | Calendars with their time zones and which is the default |
+| `search_events` | Events in a date range, with each occurrence of a repeating event listed. Text and calendar filters |
+| `get_event` | One event: description, participants and their responses, video links, repeat rule |
+| `create_event` | New event, timed or all-day. Invites attendees by email |
+| `update_event` | Changes time, title, place, calendar or attendees, for one occurrence or the whole series |
+| `respond_to_event` | Accepts, declines or tentatively accepts an invitation |
+| `delete_event` | Deletes an event, one occurrence or the series. Attendees get a cancellation if you organized it |
+| `search_contacts` | Finds contacts by any field |
+| `get_contact` | Everything on a contact card |
+| `create_contact` | New contact with name, company, emails, phones, addresses, birthday, note |
+| `update_contact` | Changes only the fields you pass |
+| `delete_contacts` | Deletes contacts |
+
+Every tool that emails other people (invites, replies, cancellations) takes `notify: false` to skip the email.
 
 ## Setup
 
@@ -72,23 +86,24 @@ Use:      app --(your server's access token)--> /mcp --(JMAP)--> your server
 
 My first version pointed Claude straight at Stalwart's OAuth, and it never got past sign-in. Claude asks for every scope the server advertises (admin ones included), and asks for a token for the connector's URL, which the server won't issue. So the connector is its own small OAuth server in front of yours:
 
-- `/oauth/authorize` sends you to your server's login with the connector's own client ID and only the mail scope (`urn:ietf:params:oauth:scope:mail`, plus `offline_access` so Claude stays connected).
+- `/oauth/authorize` sends you to your server's login with the connector's own client ID and only the mail, calendars and contacts scopes (`urn:ietf:params:oauth:scope:mail`, `...:calendars`, `...:contacts`, plus `offline_access` so Claude stays connected).
 - The app's PKCE challenge is passed through unchanged, so your mail server does the PKCE check itself.
 - The tokens the app gets back are your server's own access and refresh tokens. Each `/mcp` request is checked by asking your server for the JMAP session with that token, so there's no database and no secret to configure.
 
 ## Privacy and security
 
 - Nothing is stored. No passwords, no tokens, no mail. Each request carries your server's token and the connector forwards it.
-- Claude, ChatGPT and apps on your own computer go straight to your server's login. Any other app first gets a page on the connector that names where the sign-in will go ("vscode.dev wants to read, send and delete your email"). Without it, anyone could send you a sign-in link that hands your mail to their server, and your mail server's consent screen would only say "mail-mcp".
+- Claude, ChatGPT and apps on your own computer go straight to your server's login. Any other app first gets a page on the connector that names where the sign-in will go ("vscode.dev wants to read, send and delete your email..."). Without it, anyone could send you a sign-in link that hands your mail to their server, and your mail server's consent screen would only say "mail-mcp".
 - Each sign-in is tied to the browser that started it with a short-lived cookie, so a login link built by someone else fails at the callback.
-- The connector only asks your server for the mail scope, never admin, settings, contacts or calendars.
+- The connector only asks your server for mail, calendars and contacts, never admin, settings or files.
 - The tools can send and delete mail. An email can contain text written to steer an AI, so if that worries you, keep `send_email` and `delete_emails` on "ask" in your app's tool permissions.
 - Your deployment only talks to the one server in `JMAP_SESSION_URL`.
 
 ## Limitations
 
 - JMAP only. No IMAP or SMTP.
-- Mail only for now: no calendars or contacts, no sending attachments.
+- No sending attachments, no contact photos.
+- Connected before calendars and contacts were added? Disconnect and reconnect once to grant them. Mail keeps working either way.
 - Tested with Stalwart 1.1. Other JMAP servers need OAuth with RFC 8414 metadata at the server's root and client metadata document support.
 
 ## Project structure
@@ -97,7 +112,9 @@ My first version pointed Claude straight at Stalwart's OAuth, and it never got p
 app/mcp/route.ts           MCP endpoint, checks the token against your server
 app/oauth/*                authorize, callback, token, register, client.json
 app/.well-known/*          OAuth discovery documents
-lib/tools.ts               the tools
+lib/tools.ts               the mail tools
+lib/calendar.ts            the calendar tools
+lib/contacts.ts            the contact tools
 lib/jmap.ts                small JMAP client
 lib/oauth.ts               callback rules, state and upstream discovery
 lib/consent.ts             the page shown before signing in for an unknown app
