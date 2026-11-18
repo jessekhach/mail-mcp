@@ -4,7 +4,16 @@ import { call, download, getSession, upload, VACATION, parseAddress, formatAddre
 
 export type Ctx = { http?: { authInfo?: { token: string } } };
 type Mailbox = { id: string; name: string; role: string | null; parentId: string | null; totalEmails: number; unreadEmails: number };
-type Identity = { id: string; name: string; email: string };
+type Identity = { id: string; name: string; email: string; textSignature?: string | null; htmlSignature?: string | null };
+
+/** The address's server-stored signature, ready to go under the body. */
+const signature = (i: Identity) => {
+  const s = i.textSignature?.trim();
+  return s ? `\n\n${s.startsWith("--") ? "" : "-- \n"}${s}` : "";
+};
+const escapeHtml = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const htmlSignature = (i: Identity) =>
+  i.htmlSignature?.trim() ? `<br><br>-- <br>${i.htmlSignature}` : i.textSignature?.trim() ? `<br><br>-- <br>${escapeHtml(i.textSignature.trim()).replace(/\n/g, "<br>")}` : "";
 
 export async function auth(ctx: Ctx) {
   const token = ctx.http?.authInfo?.token;
@@ -25,7 +34,7 @@ async function getMailboxes(token: string, s: Session): Promise<Mailbox[]> {
 
 export async function getIdentities(token: string, s: Session): Promise<Identity[]> {
   const r = await call(token, s, [["Identity/get", { accountId: s.accountId }, "i"]]);
-  return r.i.list.map((i: Identity) => ({ id: i.id, name: i.name, email: i.email }));
+  return r.i.list.map((i: Identity) => ({ id: i.id, name: i.name, email: i.email, textSignature: i.textSignature, htmlSignature: i.htmlSignature }));
 }
 
 /** Matches a mailbox by id, role (inbox, sent, drafts, trash, archive, junk) or name. */
@@ -337,7 +346,7 @@ export function registerTools(server: McpServer) {
     async (a, ctx) => {
       const { token, session } = await auth(ctx as Ctx);
       const identity = pickIdentity(await getIdentities(token, session), a.from, session.username);
-      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body, html: a.html, attachments: await resolveAttachments(token, session, a.attachments) }, true);
+      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body + signature(identity), html: a.html && a.html + htmlSignature(identity), attachments: await resolveAttachments(token, session, a.attachments) }, true);
       return reply({ sent: true, ...res });
     },
   );
@@ -353,7 +362,7 @@ export function registerTools(server: McpServer) {
     async (a, ctx) => {
       const { token, session } = await auth(ctx as Ctx);
       const identity = pickIdentity(await getIdentities(token, session), a.from, session.username);
-      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body, html: a.html, attachments: await resolveAttachments(token, session, a.attachments) }, false);
+      const res = await compose(token, session, { identity, to: a.to.map(parseAddress), cc: a.cc?.map(parseAddress), bcc: a.bcc?.map(parseAddress), subject: a.subject, body: a.body + signature(identity), html: a.html && a.html + htmlSignature(identity), attachments: await resolveAttachments(token, session, a.attachments) }, false);
       return reply({ draft: true, ...res });
     },
   );
@@ -400,7 +409,7 @@ export function registerTools(server: McpServer) {
       const res = await compose(
         token,
         session,
-        { identity, to, cc, subject, body: a.body + quoted, inReplyTo: o.messageId ?? [], references: [...(o.references ?? []), ...(o.messageId ?? [])], attachments: await resolveAttachments(token, session, a.attachments) },
+        { identity, to, cc, subject, body: a.body + signature(identity) + quoted, inReplyTo: o.messageId ?? [], references: [...(o.references ?? []), ...(o.messageId ?? [])], attachments: await resolveAttachments(token, session, a.attachments) },
         a.send,
       );
       if (a.send) await call(token, session, [["Email/set", { accountId: session.accountId, update: { [a.email_id]: { "keywords/$answered": true } } }, "a"]]);
@@ -529,16 +538,17 @@ export function registerTools(server: McpServer) {
       const attachments: Attachment[] = a.include_attachments
         ? (o.attachments ?? []).map((p: any, i: number) => ({ blobId: p.blobId, type: p.type, name: p.name ?? `attachment-${i + 1}` }))
         : [];
+      const identity = pickIdentity(ids, fromEmail, session.username);
       const res = await compose(
         token,
         session,
         {
-          identity: pickIdentity(ids, fromEmail, session.username),
+          identity,
           to: a.to.map(parseAddress),
           cc: a.cc?.map(parseAddress),
           bcc: a.bcc?.map(parseAddress),
           subject: /^fwd?:/i.test(o.subject ?? "") ? o.subject : `Fwd: ${o.subject ?? ""}`,
-          body: `${a.body ? `${a.body}\n\n` : ""}${header}\n\n${bodyText(o)}`,
+          body: `${a.body}${signature(identity)}\n\n${header}\n\n${bodyText(o)}`.trimStart(),
           attachments,
         },
         a.send,
@@ -634,7 +644,7 @@ export function registerTools(server: McpServer) {
     "update_identity",
     {
       title: "Edit sending address",
-      description: "Changes the display name, signature, Reply-To or automatic Bcc of one of your sending addresses (see list_identities). Signatures are not added to messages sent through this connector.",
+      description: "Changes the display name, signature, Reply-To or automatic Bcc of one of your sending addresses (see list_identities). The signature is added under every message this connector sends, replies, forwards or drafts from that address.",
       inputSchema: z.object({
         identity: z.string().describe("The address, e.g. jesse@example.com, or its id"),
         name: z.string().optional().describe("Display name shown as the sender"),
